@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>安全な動画＋音声再生</title>
+<style>
+body {
+  display: flex;
+  justify-content: center;
+  margin-top: 50px;
+  gap: 20px;
+}
+canvas {
+  border: 1px solid black;
+}
+</style>
+</head>
+<body>
+
+<button id="playBtn">▶ 再生</button>
+<canvas id="cv" width="640" height="360"></canvas>
+
+<script>
+/* ===============================
+   基本設定
+================================ */
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+const FPS = 30;
+const TOTAL_FRAMES = 1957;
+const keyHex = '3fa59f92e898e0de23171fed1dbd593d';
+
+const THUMBNAIL_FILE = 'encrypted_frames/thumbnail.jpg.img';
+
+/* ===============================
+   フレーム一覧
+================================ */
+const frameFiles = Array.from({ length: TOTAL_FRAMES }, (_, i) => {
+  const num = (i + 1).toString().padStart(3, '0');
+  return `encrypted_frames/frame${num}.jpg.img`;
+});
+
+/* ===============================
+   状態変数
+================================ */
+let audioCtx = null;
+let startTime = 0;
+let currentFrame = -1;
+let isPlaying = false;
+let frameBuffer = [];
+
+/* ===============================
+   AES復号
+================================ */
+async function decrypt(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const iv = bytes.slice(0, 16);
+  const data = bytes.slice(16);
+
+  const keyBytes = new Uint8Array(
+    keyHex.match(/.{2}/g).map(h => parseInt(h, 16))
+  );
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    'AES-CBC',
+    false,
+    ['decrypt']
+  );
+
+  return crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv },
+    cryptoKey,
+    data
+  );
+}
+
+/* ===============================
+   Canvas
+================================ */
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+
+/* ===============================
+   サムネイル（安全描画）
+================================ */
+async function showThumbnailSecure() {
+  try {
+    const res = await fetch(THUMBNAIL_FILE);
+    const decrypted = await decrypt(await res.arrayBuffer());
+
+    const blob = new Blob([decrypted], { type: 'image/jpeg' });
+    const bitmap = await createImageBitmap(blob);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = 'rgba(255,0,0,0.4)';
+    ctx.font = '20px sans-serif';
+    ctx.fillText('Protected Preview', 20, canvas.height - 20);
+
+    bitmap.close(); // ← 超重要
+  } catch (e) {
+    console.error('Thumbnail error:', e);
+  }
+}
+
+/* ===============================
+   音声再生
+================================ */
+async function playAudio() {
+  if (isPlaying) return;
+
+  isPlaying = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+
+  const res = await fetch('encrypted_audio.img');
+  const decrypted = await decrypt(await res.arrayBuffer());
+  const audioBuffer = await audioCtx.decodeAudioData(decrypted);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+  source.start();
+
+  startTime = audioCtx.currentTime;
+}
+
+/* ===============================
+   フレーム描画（安全）
+================================ */
+async function drawLoop() {
+  if (!audioCtx) return;
+
+  const elapsed = audioCtx.currentTime - startTime;
+  const targetFrame = Math.floor(elapsed * FPS);
+
+  if (
+    targetFrame >= 0 &&
+    targetFrame < frameFiles.length &&
+    targetFrame !== currentFrame
+  ) {
+    currentFrame = targetFrame;
+
+    if (frameBuffer.length > 0) {
+      const frameData = frameBuffer.shift();
+      const blob = new Blob([frameData], { type: 'image/jpeg' });
+      const bitmap = await createImageBitmap(blob);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = 'rgba(255,0,0,0.4)';
+      ctx.font = '20px sans-serif';
+      ctx.fillText('Protected', 20, canvas.height - 20);
+
+      bitmap.close();
+    }
+
+    // 次フレーム先読み
+    if (targetFrame + 1 < frameFiles.length) {
+      const res = await fetch(frameFiles[targetFrame + 1]);
+      const decrypted = await decrypt(await res.arrayBuffer());
+      frameBuffer.push(decrypted);
+    }
+  }
+
+  requestAnimationFrame(drawLoop);
+}
+
+/* ===============================
+   再生ボタン
+================================ */
+document.getElementById('playBtn').addEventListener('click', async () => {
+  if (!isPlaying) {
+    await playAudio();
+    drawLoop();
+  }
+});
+
+/* ===============================
+   初期表示
+================================ */
+showThumbnailSecure();
+</script>
+
+</body>
+</html>
